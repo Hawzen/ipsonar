@@ -1,0 +1,21 @@
+{
+  "name": "@ipsonar/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n tsc,node \"tsc -w -p tsconfig.json\" \"node --watch dist/server.js\"",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@ipsonar/shared": "0.1.0",
+    "fastify": "^5.0.0",
+    "geoip-lite": "^1.4.10"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.2"
+  }
+}

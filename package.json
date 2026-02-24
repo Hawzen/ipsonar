@@ -1,0 +1,17 @@
+{
+  "name": "ipsonar",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend \"npm run dev -w @ipsonar/backend\" \"npm run dev -w @ipsonar/frontend\"",
+    "build": "npm run build -ws",
+    "test": "npm run test -ws --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
