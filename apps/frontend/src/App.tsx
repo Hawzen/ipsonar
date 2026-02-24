@@ -48,11 +48,11 @@ function compactNodeTitle(node: TreeNodeData): string {
   return node.label;
 }
 
-function formatTotalLatency(node: TreeNodeData): string | undefined {
+function formatTotalLatency(node: TreeNodeData, parent?: TreeNodeData): string | undefined {
   if (node.kind !== "target") {
     return undefined;
   }
-  const avg = node.latencyMs?.avg;
+  const avg = node.totalLatencyMs?.avg ?? node.latencyMs?.avg ?? parent?.latencyMs?.avg;
   if (typeof avg !== "number") {
     return undefined;
   }
@@ -60,13 +60,7 @@ function formatTotalLatency(node: TreeNodeData): string | undefined {
 }
 
 function formatEdgeLabel(node: TreeNodeData, parent?: TreeNodeData): string | undefined {
-  const nodeLatency = node.latencyMs?.avg;
-  const parentLatency = parent?.latencyMs?.avg;
-  const jumpLatency =
-    typeof nodeLatency === "number"
-      ? Math.max(0, nodeLatency - (typeof parentLatency === "number" ? parentLatency : 0))
-      : undefined;
-  const jump = jumpLatency !== undefined ? `+${jumpLatency.toFixed(1)}ms` : undefined;
+  const jump = node.stepLatencyMs ? `+${node.stepLatencyMs.avg.toFixed(1)}ms` : undefined;
   const skipped = node.skippedFromPrev.avg > 0 ? `skip ${Math.round(node.skippedFromPrev.avg)}` : undefined;
 
   if (jump && skipped) {
@@ -123,7 +117,7 @@ function buildGraph(treeData?: TreeNodeData): { nodes: Node<GraphNodePayload>[];
         title: compactNodeTitle(node),
         subtitle,
         kind: node.kind,
-        totalLatencyLabel: formatTotalLatency(node),
+        totalLatencyLabel: formatTotalLatency(node, parent),
         locationLabel,
         flag
       },
@@ -270,8 +264,7 @@ export function App(): React.JSX.Element {
       if (intentionalCloseRef.current) {
         return;
       }
-      setError("Stream disconnected. Check backend logs and try again.");
-      closeSse();
+      void recoverRunFromSnapshot(runId);
     };
   }
 
@@ -322,6 +315,31 @@ export function App(): React.JSX.Element {
       sseRef.current.close();
       sseRef.current = null;
     }
+  }
+
+  async function recoverRunFromSnapshot(runId: string): Promise<void> {
+    try {
+      const res = await fetch(`${API_BASE}/api/runs/${runId}`);
+      if (!res.ok) {
+        throw new Error(`snapshot fetch failed (${res.status})`);
+      }
+      const snapshot = (await res.json()) as RunSnapshot;
+      setRun(snapshot);
+      setRunStatus(snapshot.status);
+
+      if (snapshot.status === "completed" || snapshot.status === "failed" || snapshot.status === "cancelled") {
+        appendLine(`[run.recovered] ${snapshot.status}`);
+        closeSse();
+        return;
+      }
+    } catch {
+      setError("Stream disconnected. Check backend logs and try again.");
+      closeSse();
+      return;
+    }
+
+    setError("Stream disconnected. Check backend logs and try again.");
+    closeSse();
   }
 
   return (

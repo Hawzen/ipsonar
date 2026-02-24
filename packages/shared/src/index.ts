@@ -39,6 +39,18 @@ export type TreeNodeData = {
     avg: number;
     samples: number;
   };
+  stepLatencyMs?: {
+    min: number;
+    max: number;
+    avg: number;
+    samples: number;
+  };
+  totalLatencyMs?: {
+    min: number;
+    max: number;
+    avg: number;
+    samples: number;
+  };
   rawLines: string[];
   children: TreeNodeData[];
 };
