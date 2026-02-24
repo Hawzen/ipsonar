@@ -1,6 +1,8 @@
 import type { FastifyReply } from "fastify";
 import type { RunEvent, RunSnapshot, TargetRunSummary, TreeNodeData, TreeNodeKind } from "@ipsonar/shared";
 import geoip from "geoip-lite";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { startTraceroute } from "./traceroute.js";
 import { FIXED_TRACE_CONFIG, type NormalizedRunOptions } from "./validation.js";
 
@@ -35,6 +37,8 @@ type TreeNode = {
   isPrivateIp?: boolean;
   target?: string;
   latencyValues: number[];
+  stepLatencyValues: number[];
+  totalLatencyValues: number[];
   skippedValues: number[];
   sourceTargets: Set<string>;
   rawLines: Set<string>;
@@ -42,7 +46,7 @@ type TreeNode = {
 };
 
 const MAX_TARGET_RUNTIME_MS = 20_000;
-const TRACEROUTE_FANOUT = 8;
+const TRACEROUTE_FANOUT = 1;
 const countryNames = new Intl.DisplayNames(["en"], { type: "region" });
 
 function isPrivateIp(ip?: string): boolean {
@@ -124,6 +128,64 @@ function parseHopLine(line: string): HopPoint | null {
   };
 }
 
+async function resolveTargetIp(target: string): Promise<string | undefined> {
+  if (isIP(target) !== 0) {
+    return target;
+  }
+
+  try {
+    const v4 = await lookup(target, { family: 4 });
+    return v4.address;
+  } catch {
+    // Fall through and try IPv6 lookup as a fallback.
+  }
+
+  try {
+    const v6 = await lookup(target, { family: 6 });
+    return v6.address;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildCanonicalTracePath(traceHops: HopPoint[], resolvedIp?: string): {
+  hops: HopPoint[];
+  reachedDestination: boolean;
+  answeredCount: number;
+  finalLatency: number;
+} {
+  const merged = mergeHopPoints(traceHops);
+  const answered = merged.filter((hop) => !hop.unanswered);
+  const reachedDestination = resolvedIp ? answered.some((hop) => hop.label === resolvedIp) : false;
+  const finalLatency = answered.length > 0 ? answered[answered.length - 1].latencyMs ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY;
+
+  return {
+    hops: merged,
+    reachedDestination,
+    answeredCount: answered.length,
+    finalLatency
+  };
+}
+
+function pickCanonicalTrace(traceBuckets: HopPoint[][], resolvedIp?: string): HopPoint[] {
+  const candidates = traceBuckets.map((traceHops) => buildCanonicalTracePath(traceHops, resolvedIp));
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  candidates.sort((a, b) => {
+    if (a.reachedDestination !== b.reachedDestination) {
+      return a.reachedDestination ? -1 : 1;
+    }
+    if (a.answeredCount !== b.answeredCount) {
+      return b.answeredCount - a.answeredCount;
+    }
+    return a.finalLatency - b.finalLatency;
+  });
+
+  return candidates[0].hops;
+}
+
 function newTreeNode(args: {
   key: string;
   label: string;
@@ -147,6 +209,8 @@ function newTreeNode(args: {
     isPrivateIp: args.isPrivateIp,
     target: args.target,
     latencyValues: [],
+    stepLatencyValues: [],
+    totalLatencyValues: [],
     skippedValues: [],
     sourceTargets: new Set(),
     rawLines: new Set(),
@@ -157,7 +221,7 @@ function newTreeNode(args: {
 function buildTree(paths: Map<string, HopPoint[]>): TreeNode {
   const root = newTreeNode({ key: "source", label: "source", kind: "source" });
 
-  for (const [target, hops] of paths.entries()) {
+    for (const [target, hops] of paths.entries()) {
     const ordered = [...hops].sort((a, b) => a.ttl - b.ttl);
     const pathSteps: Array<{
       key: string;
@@ -167,12 +231,16 @@ function buildTree(paths: Map<string, HopPoint[]>): TreeNode {
       ip?: string;
       target?: string;
       latencyMs?: number;
+      stepLatencyMs?: number;
+      totalLatencyMs?: number;
       skippedFromPrev?: number;
       raw?: string;
     }> = [];
 
     let previousLabel: string | null = null;
     let previousAnsweredTtl = 0;
+    let previousLatencyMs: number | undefined;
+    let cumulativeStepLatencyMs = 0;
 
     for (const hop of ordered) {
       if (hop.unanswered) {
@@ -185,6 +253,18 @@ function buildTree(paths: Map<string, HopPoint[]>): TreeNode {
 
       const skippedFromPrev = Math.max(0, hop.ttl - previousAnsweredTtl - 1);
       previousAnsweredTtl = hop.ttl;
+      const stepLatencyMs =
+        hop.latencyMs !== undefined
+          ? previousLatencyMs !== undefined
+            ? Math.max(0, hop.latencyMs - previousLatencyMs)
+            : hop.latencyMs
+          : undefined;
+      if (hop.latencyMs !== undefined) {
+        previousLatencyMs = hop.latencyMs;
+      }
+      if (stepLatencyMs !== undefined) {
+        cumulativeStepLatencyMs += stepLatencyMs;
+      }
 
       pathSteps.push({
         key: `hop:${hop.ttl}:${hop.label}`,
@@ -193,6 +273,7 @@ function buildTree(paths: Map<string, HopPoint[]>): TreeNode {
         ttl: hop.ttl,
         ip: hop.label,
         latencyMs: hop.latencyMs,
+        stepLatencyMs,
         skippedFromPrev,
         raw: hop.raw
       });
@@ -202,7 +283,8 @@ function buildTree(paths: Map<string, HopPoint[]>): TreeNode {
       key: `target:${target}`,
       label: `target: ${target}`,
       kind: "target",
-      target
+      target,
+      totalLatencyMs: cumulativeStepLatencyMs
     });
 
     let node = root;
@@ -229,6 +311,12 @@ function buildTree(paths: Map<string, HopPoint[]>): TreeNode {
 
       if (step.latencyMs !== undefined) {
         child.latencyValues.push(step.latencyMs);
+      }
+      if (step.stepLatencyMs !== undefined) {
+        child.stepLatencyValues.push(step.stepLatencyMs);
+      }
+      if (step.totalLatencyMs !== undefined) {
+        child.totalLatencyValues.push(step.totalLatencyMs);
       }
       if (step.skippedFromPrev !== undefined) {
         child.skippedValues.push(step.skippedFromPrev);
@@ -311,6 +399,8 @@ function summarizeNumberSeries(values: number[]): { min: number; max: number; av
 
 function toTreeNodeData(node: TreeNode): TreeNodeData {
   const latencySummary = summarizeNumberSeries(node.latencyValues);
+  const stepLatencySummary = summarizeNumberSeries(node.stepLatencyValues);
+  const totalLatencySummary = summarizeNumberSeries(node.totalLatencyValues);
   const skippedSummary = summarizeNumberSeries(node.skippedValues);
 
   return {
@@ -333,6 +423,24 @@ function toTreeNodeData(node: TreeNode): TreeNodeData {
             max: latencySummary.max,
             avg: latencySummary.avg,
             samples: node.latencyValues.length
+          }
+        : undefined,
+    stepLatencyMs:
+      node.stepLatencyValues.length > 0
+        ? {
+            min: stepLatencySummary.min,
+            max: stepLatencySummary.max,
+            avg: stepLatencySummary.avg,
+            samples: node.stepLatencyValues.length
+          }
+        : undefined,
+    totalLatencyMs:
+      node.totalLatencyValues.length > 0
+        ? {
+            min: totalLatencySummary.min,
+            max: totalLatencySummary.max,
+            avg: totalLatencySummary.avg,
+            samples: node.totalLatencyValues.length
           }
         : undefined,
     rawLines: [...node.rawLines].slice(0, 10),
@@ -488,14 +596,17 @@ export class RunManager {
     target.startedAt = nowIso();
     this.emit(run, { type: "target.started", target: targetName });
 
-    const rawHops: HopPoint[] = [];
-    run.tracePaths.set(targetName, rawHops);
+    const traceBuckets: HopPoint[][] = Array.from({ length: TRACEROUTE_FANOUT }, () => []);
+    run.tracePaths.set(targetName, []);
+
+    const resolvedTargetIp = await resolveTargetIp(targetName);
+    const tracerouteTarget = resolvedTargetIp ?? targetName;
 
     let hitHardTimeout = false;
     const traces = Array.from({ length: TRACEROUTE_FANOUT }, (_, idx) =>
       startTraceroute(
         {
-          target: targetName,
+          target: tracerouteTarget,
           maxHops: FIXED_TRACE_CONFIG.maxHops,
           timeoutSecPerProbe: FIXED_TRACE_CONFIG.timeoutSecPerProbe,
           queriesPerHop: FIXED_TRACE_CONFIG.queriesPerHop
@@ -503,7 +614,7 @@ export class RunManager {
         (line) => {
           const hop = parseHopLine(line);
           if (hop) {
-            rawHops.push(hop);
+            traceBuckets[idx].push(hop);
           }
 
           this.emit(run, {
@@ -547,8 +658,8 @@ export class RunManager {
       run.childCancels.delete(trace.cancel);
     }
 
-    const mergedHops = mergeHopPoints(rawHops);
-    run.tracePaths.set(targetName, mergedHops);
+    const canonicalHops = pickCanonicalTrace(traceBuckets, resolvedTargetIp);
+    run.tracePaths.set(targetName, canonicalHops);
 
     if (run.cancelled) {
       target.status = "cancelled";

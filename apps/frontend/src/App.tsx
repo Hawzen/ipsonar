@@ -52,7 +52,7 @@ function formatTotalLatency(node: TreeNodeData, parent?: TreeNodeData): string |
   if (node.kind !== "target") {
     return undefined;
   }
-  const avg = node.latencyMs?.avg ?? parent?.latencyMs?.avg;
+  const avg = node.totalLatencyMs?.avg ?? node.latencyMs?.avg ?? parent?.latencyMs?.avg;
   if (typeof avg !== "number") {
     return undefined;
   }
@@ -60,13 +60,7 @@ function formatTotalLatency(node: TreeNodeData, parent?: TreeNodeData): string |
 }
 
 function formatEdgeLabel(node: TreeNodeData, parent?: TreeNodeData): string | undefined {
-  const nodeLatency = node.latencyMs?.avg;
-  const parentLatency = parent?.latencyMs?.avg;
-  const jumpLatency =
-    typeof nodeLatency === "number"
-      ? Math.max(0, nodeLatency - (typeof parentLatency === "number" ? parentLatency : 0))
-      : undefined;
-  const jump = jumpLatency !== undefined ? `+${jumpLatency.toFixed(1)}ms` : undefined;
+  const jump = node.stepLatencyMs ? `+${node.stepLatencyMs.avg.toFixed(1)}ms` : undefined;
   const skipped = node.skippedFromPrev.avg > 0 ? `skip ${Math.round(node.skippedFromPrev.avg)}` : undefined;
 
   if (jump && skipped) {
