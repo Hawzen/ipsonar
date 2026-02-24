@@ -41,9 +41,8 @@ type TreeNode = {
   children: Map<string, TreeNode>;
 };
 
-const MAX_TARGET_RUNTIME_MS =
-  FIXED_TRACE_CONFIG.maxHops * FIXED_TRACE_CONFIG.queriesPerHop * FIXED_TRACE_CONFIG.timeoutSecPerProbe * 1000 + 5000;
-const TRACEROUTE_FANOUT = 4;
+const MAX_TARGET_RUNTIME_MS = 20_000;
+const TRACEROUTE_FANOUT = 8;
 const countryNames = new Intl.DisplayNames(["en"], { type: "region" });
 
 function isPrivateIp(ip?: string): boolean {
